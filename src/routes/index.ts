@@ -17,6 +17,7 @@ router.get('/health', (req, res) => {
         success: true,
         message: 'Server is healthy',
         timestamp: new Date().toISOString(),
+        requestId: res.locals['requestId'],
     });
 });
 

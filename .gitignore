@@ -85,11 +85,6 @@ jspm_packages/
 # TernJS port file
 .tern-port
 
-# Docker
-.dockerignore
-Dockerfile*
-docker-compose*.yml
-
 # IDE
 .vscode/
 .idea/

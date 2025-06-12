@@ -26,6 +26,12 @@ export const errorHandler = (
         message = error.message;
     }
 
+    // Handle JSON parsing errors
+    else if (error instanceof SyntaxError && 'body' in error) {
+        statusCode = 400;
+        message = 'Invalid JSON format';
+    }
+
     // Handle Prisma errors
     else if (error.name === 'PrismaClientKnownRequestError') {
         const prismaError = error as any;

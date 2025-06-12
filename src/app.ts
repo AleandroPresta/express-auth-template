@@ -35,8 +35,10 @@ export const createApp = (): express.Application => {
     // Request ID middleware
     app.use(requestId);
 
-    // Rate limiting
-    app.use(generalLimiter);
+    // Rate limiting (disabled in test environment)
+    if (process.env.NODE_ENV !== 'test') {
+        app.use(generalLimiter);
+    }
 
     // API routes
     app.use('/api/v1', routes);

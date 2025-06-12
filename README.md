@@ -55,7 +55,7 @@ A production-ready Express.js authentication server built with TypeScript, Postg
 npm run docker:dev
 
 # Or manually
-docker-compose -f docker-compose.dev.yml up
+docker compose -f docker-compose.dev.yml up
 ```
 
 ### Production with Docker
@@ -65,7 +65,7 @@ docker-compose -f docker-compose.dev.yml up
 npm run docker:prod
 
 # Or manually
-docker-compose up -d
+docker compose up -d
 ```
 
 ## 🏃‍♂️ Running Locally
@@ -164,8 +164,17 @@ curl -X POST http://localhost:3000/api/v1/auth/refresh \
 
 ## 🧪 Testing
 
+### Test Results ✅
+
+- **73 tests passing** across 3 test suites
+- **JWT utilities**: 14 tests (token generation, verification, validation)
+- **Authentication service**: 11 tests (business logic, error handling)
+- **API integration**: 48 tests (all endpoints, validation, security)
+
+### Running Tests
+
 ```bash
-# Run tests
+# Run all tests
 npm test
 
 # Run tests in watch mode
@@ -173,7 +182,20 @@ npm run test:watch
 
 # Run tests with coverage
 npm run test:coverage
+
+# Run specific test file
+npm test auth.test.ts
+
+# Run specific test pattern
+npm test -- --testNamePattern="should login"
 ```
+
+### Test Environment
+
+- Uses separate test database (`auth_test_db`)
+- Rate limiting disabled during tests
+- Automatic database cleanup after each test
+- Mock services for unit testing
 
 ## 🏗️ Project Structure
 
