@@ -11,19 +11,20 @@ This project is a production-ready Express.js authentication server that serves 
 3. [Technology Stack Deep Dive](#technology-stack-deep-dive)
 4. [Project Architecture](#project-architecture)
 5. [File Structure Explained](#file-structure-explained)
-6. [Security Concepts](#security-concepts)
-7. [Database Design](#database-design)
-8. [API Design Patterns](#api-design-patterns)
-9. [Prerequisites & Setup](#prerequisites--setup)
-10. [Installation & Running](#installation--running)
-11. [API Documentation](#api-documentation)
-12. [Testing Strategy](#testing-strategy)
-13. [Docker & Containerization](#docker--containerization)
-14. [Development Workflow](#development-workflow)
-15. [Extending the Project](#extending-the-project)
-16. [Best Practices & Patterns](#best-practices--patterns)
-17. [Troubleshooting](#troubleshooting)
-18. [Further Learning](#further-learning)
+6. [Code Deep Dive](#code-deep-dive)
+7. [Security Concepts](#security-concepts)
+8. [Database Design](#database-design)
+9. [API Design Patterns](#api-design-patterns)
+10. [Prerequisites & Setup](#prerequisites--setup)
+11. [Installation & Running](#installation--running)
+12. [API Documentation](#api-documentation)
+13. [Testing Strategy](#testing-strategy)
+14. [Docker & Containerization](#docker--containerization)
+15. [Development Workflow](#development-workflow)
+16. [Extending the Project](#extending-the-project)
+17. [Best Practices & Patterns](#best-practices--patterns)
+18. [Troubleshooting](#troubleshooting)
+19. [Further Learning](#further-learning)
 
 ---
 
@@ -500,6 +501,1162 @@ model User {
 
 **`prisma/seed.ts`** - Database Seeding
 Script to populate database with initial data for development/testing.
+
+---
+
+## Code Deep Dive
+
+Now that you understand the overall architecture, let's dive deep into the actual code. We'll examine each file, understand its purpose, and see how it connects with other parts of the system.
+
+### Application Entry Point
+
+#### `src/index.ts` - The Starting Point
+
+This is where everything begins. When you run `npm start` or `npm run dev`, Node.js executes this file first.
+
+```typescript
+import { createApp } from './app';
+import { config } from './config';
+import { initializeDatabase, disconnectDatabase } from './config/database';
+
+const startServer = async (): Promise<void> => {
+  try {
+    // 1. Initialize database connection
+    await initializeDatabase();
+
+    // 2. Create Express app with all middleware
+    const app = createApp();
+
+    // 3. Start HTTP server
+    const server = app.listen(config.PORT, () => {
+      console.log(`🚀 Server running on port ${config.PORT}`);
+    });
+
+    // 4. Handle graceful shutdown
+    const gracefulShutdown = async (signal: string) => {
+      console.log(`Received ${signal}. Shutting down gracefully...`);
+      server.close();
+      await disconnectDatabase();
+      process.exit(0);
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+startServer();
+```
+
+**Key Responsibilities**:
+
+1. **Database Initialization**: Connects to PostgreSQL via Prisma
+2. **App Creation**: Calls `createApp()` to set up Express with all middleware
+3. **Server Startup**: Starts the HTTP server on the configured port
+4. **Graceful Shutdown**: Handles termination signals properly
+5. **Error Handling**: Catches startup errors and exits gracefully
+
+**Connections**:
+
+- Imports `createApp` from `./app.ts`
+- Imports configuration from `./config/index.ts`
+- Imports database functions from `./config/database.ts`
+
+### Express Application Setup
+
+#### `src/app.ts` - Application Configuration
+
+This file creates and configures the Express application with all necessary middleware.
+
+```typescript
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import { config } from './config';
+import { routes } from './routes';
+import { requestId } from './middleware/requestId';
+import { generalLimiter } from './middleware/rateLimiter';
+import { errorHandler, notFoundHandler } from './middleware/errorHandler';
+
+export const createApp = (): express.Application => {
+  const app = express();
+
+  // Security middleware
+  app.use(helmet());
+
+  // CORS configuration
+  app.use(
+    cors({
+      origin: config.CORS_ORIGIN,
+      credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
+    })
+  );
+
+  // Request parsing
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+  // Custom middleware
+  app.use(requestId);
+
+  // Rate limiting (disabled in test environment)
+  if (process.env.NODE_ENV !== 'test') {
+    app.use(generalLimiter);
+  }
+
+  // API routes
+  app.use('/api/v1', routes);
+
+  // Root endpoint
+  app.get('/', (req, res) => {
+    res.json({
+      success: true,
+      message: 'Express Auth Server API',
+      version: '1.0.0',
+      environment: config.NODE_ENV,
+      endpoints: {
+        auth: '/api/v1/auth',
+        health: '/api/v1/health',
+      },
+    });
+  });
+
+  // Error handling middleware (must be last)
+  app.use(notFoundHandler);
+  app.use(errorHandler);
+
+  return app;
+};
+```
+
+**Middleware Order Explanation**:
+
+The order of middleware in Express is crucial because each middleware function can modify the request/response or terminate the request-response cycle.
+
+1. **helmet()**: Sets security headers first
+2. **cors()**: Handles cross-origin requests
+3. **express.json()**: Parses JSON request bodies
+4. **requestId**: Adds unique ID to each request
+5. **generalLimiter**: Rate limiting protection
+6. **routes**: Your actual API endpoints
+7. **notFoundHandler**: Catches unmatched routes
+8. **errorHandler**: Handles all errors (must be last)
+
+**Connections**:
+
+- Imports all middleware from `./middleware/` directory
+- Imports routes from `./routes/index.ts`
+- Used by `src/index.ts` to create the app instance
+
+### Configuration Management
+
+#### `src/config/index.ts` - Environment Configuration
+
+This file validates and exposes all environment variables in a type-safe way.
+
+```typescript
+import { z } from 'zod';
+
+const configSchema = z.object({
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  PORT: z.string().transform(Number).default(3000),
+  DATABASE_URL: z.string(),
+  JWT_ACCESS_SECRET: z.string().min(32),
+  JWT_REFRESH_SECRET: z.string().min(32),
+  JWT_ACCESS_EXPIRES_IN: z.string().default('15m'),
+  JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
+  BCRYPT_ROUNDS: z.string().transform(Number).default(12),
+  CORS_ORIGIN: z.string().default('http://localhost:3000'),
+});
+
+const parseConfig = () => {
+  try {
+    return configSchema.parse(process.env);
+  } catch (error) {
+    console.error('❌ Invalid environment configuration:');
+    if (error instanceof z.ZodError) {
+      error.errors.forEach((err) => {
+        console.error(`  ${err.path.join('.')}: ${err.message}`);
+      });
+    }
+    process.exit(1);
+  }
+};
+
+export const config = parseConfig();
+```
+
+**Why This Approach?**:
+
+- **Type Safety**: TypeScript knows exactly what config values are available
+- **Validation**: Ensures all required environment variables are present and valid
+- **Default Values**: Provides sensible defaults for optional configurations
+- **Early Failure**: App won't start with invalid configuration
+- **Documentation**: The schema serves as documentation for required env vars
+
+**Connections**:
+
+- Used throughout the application for configuration values
+- Imported by `src/index.ts`, `src/app.ts`, and many other files
+
+#### `src/config/database.ts` - Database Connection
+
+Manages the Prisma database connection with proper initialization and cleanup.
+
+```typescript
+import { PrismaClient } from '@prisma/client';
+
+export const prisma = new PrismaClient({
+  log: process.env.NODE_ENV === 'development' ? ['query', 'info', 'warn', 'error'] : ['error'],
+});
+
+export const initializeDatabase = async (): Promise<void> => {
+  try {
+    await prisma.$connect();
+    console.log('✅ Database connected successfully');
+  } catch (error) {
+    console.error('❌ Database connection failed:', error);
+    throw error;
+  }
+};
+
+export const disconnectDatabase = async (): Promise<void> => {
+  try {
+    await prisma.$disconnect();
+    console.log('✅ Database disconnected successfully');
+  } catch (error) {
+    console.error('❌ Database disconnection failed:', error);
+  }
+};
+```
+
+**Key Features**:
+
+- **Logging Configuration**: Shows SQL queries in development, only errors in production
+- **Connection Management**: Explicit connect/disconnect for better control
+- **Error Handling**: Proper error handling for connection issues
+
+**Connections**:
+
+- Exports `prisma` client used by all repository classes
+- Used by `src/index.ts` for app lifecycle management
+
+### HTTP Request Handlers
+
+#### `src/controllers/auth.controller.ts` - Authentication Controller
+
+Controllers are the entry point for HTTP requests. They handle the request/response cycle but delegate business logic to services.
+
+```typescript
+import { Request, Response, NextFunction } from 'express';
+import { AuthService } from '../services/auth.service';
+import { sendSuccess, sendError } from '../utils/response';
+import { AuthenticatedRequest } from '../middleware/auth';
+
+export class AuthController {
+  private authService: AuthService;
+
+  constructor() {
+    this.authService = new AuthService();
+  }
+
+  /**
+   * User registration endpoint
+   * POST /api/v1/auth/signup
+   */
+  signup = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      // Delegate business logic to service
+      const { user, tokens } = await this.authService.signup(req.body);
+
+      // Send standardized success response
+      sendSuccess(
+        res,
+        {
+          user,
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+        },
+        'User registered successfully',
+        201
+      );
+    } catch (error) {
+      // Pass errors to error handling middleware
+      next(error);
+    }
+  };
+
+  /**
+   * User login endpoint
+   * POST /api/v1/auth/login
+   */
+  login = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const { user, tokens } = await this.authService.login(req.body);
+
+      sendSuccess(
+        res,
+        {
+          user,
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+        },
+        'Login successful'
+      );
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  /**
+   * Get user profile endpoint
+   * GET /api/v1/auth/user/profile
+   */
+  getProfile = async (
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> => {
+    try {
+      // req.user is populated by authentication middleware
+      const user = await this.authService.getUserProfile(req.user!.userId);
+
+      sendSuccess(res, { user }, 'Profile retrieved successfully');
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  // ... other methods (updateProfile, logout, refreshToken)
+}
+```
+
+**Controller Responsibilities**:
+
+1. **Extract Data**: Get data from request body, params, query, headers
+2. **Call Services**: Delegate business logic to appropriate service methods
+3. **Handle Responses**: Format and send responses using utility functions
+4. **Error Forwarding**: Pass any errors to the error handling middleware
+
+**Why This Pattern?**:
+
+- **Separation of Concerns**: HTTP handling separated from business logic
+- **Testability**: Easy to test controllers by mocking services
+- **Reusability**: Services can be used by different controllers
+- **Consistency**: All controllers follow the same pattern
+
+**Connections**:
+
+- Uses `AuthService` for business logic
+- Uses response utilities from `src/utils/response.ts`
+- Uses custom types from `src/middleware/auth.ts`
+- Called by routes in `src/routes/auth.routes.ts`
+
+### Business Logic Layer
+
+#### `src/services/auth.service.ts` - Authentication Service
+
+Services contain the core business logic. They orchestrate operations between multiple repositories and handle complex business rules.
+
+```typescript
+import bcrypt from 'bcrypt';
+import { User } from '@prisma/client';
+import { UserRepository, CreateUserData } from '../repositories/user.repository';
+import { RefreshTokenRepository } from '../repositories/refreshToken.repository';
+import { generateTokenPair, verifyRefreshToken } from '../utils/jwt';
+import { config } from '../config';
+import { ConflictError, UnauthorizedError, NotFoundError } from '../utils/errors';
+
+export class AuthService {
+  private userRepository: UserRepository;
+  private refreshTokenRepository: RefreshTokenRepository;
+
+  constructor() {
+    this.userRepository = new UserRepository();
+    this.refreshTokenRepository = new RefreshTokenRepository();
+  }
+
+  /**
+   * User registration business logic
+   */
+  async signup(signupData: SignupRequest): Promise<{ user: UserSafeData; tokens: TokenPair }> {
+    const { email, password, username, name, phone } = signupData;
+
+    // Business rule: Check if user already exists
+    const existingUser = await this.userRepository.findByEmail(email);
+    if (existingUser) {
+      throw new ConflictError('User with this email already exists');
+    }
+
+    // Business rule: Check username uniqueness if provided
+    if (username) {
+      const existingUsername = await this.userRepository.findByUsername(username);
+      if (existingUsername) {
+        throw new ConflictError('Username is already taken');
+      }
+    }
+
+    // Security: Hash password
+    const hashedPassword = await bcrypt.hash(password, config.BCRYPT_ROUNDS);
+
+    // Create user
+    const userData: CreateUserData = {
+      email,
+      password: hashedPassword,
+      username,
+      name,
+      phone,
+    };
+
+    const user = await this.userRepository.create(userData);
+
+    // Generate JWT tokens
+    const tokens = generateTokenPair({
+      userId: user.id,
+      email: user.email,
+    });
+
+    // Store refresh token
+    await this.refreshTokenRepository.create({
+      token: tokens.refreshToken,
+      userId: user.id,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+    });
+
+    // Return user without sensitive data
+    const { password: _, ...userWithoutPassword } = user;
+
+    return {
+      user: userWithoutPassword,
+      tokens,
+    };
+  }
+
+  /**
+   * User login business logic
+   */
+  async login(loginData: LoginRequest): Promise<{ user: UserSafeData; tokens: TokenPair }> {
+    const { email, password } = loginData;
+
+    // Find user by email
+    const user = await this.userRepository.findByEmail(email);
+    if (!user) {
+      throw new UnauthorizedError('Invalid credentials');
+    }
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      throw new UnauthorizedError('Invalid credentials');
+    }
+
+    // Business rule: Check if account is active
+    if (!user.isActive) {
+      throw new UnauthorizedError('Account is deactivated');
+    }
+
+    // Generate new tokens
+    const tokens = generateTokenPair({
+      userId: user.id,
+      email: user.email,
+    });
+
+    // Store refresh token
+    await this.refreshTokenRepository.create({
+      token: tokens.refreshToken,
+      userId: user.id,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
+
+    const { password: _, ...userWithoutPassword } = user;
+
+    return {
+      user: userWithoutPassword,
+      tokens,
+    };
+  }
+
+  // ... other methods (refreshToken, logout, getUserProfile, updateProfile)
+}
+```
+
+**Service Responsibilities**:
+
+1. **Business Rules**: Enforce business logic and validation
+2. **Orchestration**: Coordinate between multiple repositories
+3. **Security**: Handle password hashing, token generation
+4. **Data Transformation**: Format data for controllers
+5. **Error Handling**: Throw appropriate business errors
+
+**Key Patterns**:
+
+- **Dependency Injection**: Repositories injected through constructor
+- **Single Responsibility**: Each method handles one business operation
+- **Error Handling**: Uses custom error classes for different scenarios
+- **Data Security**: Removes sensitive data before returning
+
+**Connections**:
+
+- Uses `UserRepository` and `RefreshTokenRepository` for data access
+- Uses JWT utilities from `src/utils/jwt.ts`
+- Uses custom errors from `src/utils/errors.ts`
+- Called by `AuthController`
+
+### Data Access Layer
+
+#### `src/repositories/user.repository.ts` - User Repository
+
+Repositories abstract database operations and provide a clean API for data access.
+
+```typescript
+import { User, Prisma } from '@prisma/client';
+import { prisma } from '../config/database';
+
+export interface CreateUserData {
+  email: string;
+  password: string;
+  username?: string;
+  name?: string;
+  phone?: string;
+}
+
+export interface UpdateUserData {
+  username?: string;
+  name?: string;
+  phone?: string;
+}
+
+export class UserRepository {
+  /**
+   * Create a new user
+   */
+  async create(data: CreateUserData): Promise<User> {
+    return prisma.user.create({
+      data,
+    });
+  }
+
+  /**
+   * Find user by email
+   */
+  async findByEmail(email: string): Promise<User | null> {
+    return prisma.user.findUnique({
+      where: { email },
+    });
+  }
+
+  /**
+   * Find user by ID
+   */
+  async findById(id: string): Promise<User | null> {
+    return prisma.user.findUnique({
+      where: { id },
+    });
+  }
+
+  /**
+   * Find user by username
+   */
+  async findByUsername(username: string): Promise<User | null> {
+    return prisma.user.findUnique({
+      where: { username },
+    });
+  }
+
+  /**
+   * Update user data
+   */
+  async update(id: string, data: UpdateUserData): Promise<User> {
+    return prisma.user.update({
+      where: { id },
+      data,
+    });
+  }
+
+  /**
+   * Soft delete user (set isActive to false)
+   */
+  async softDelete(id: string): Promise<User> {
+    return prisma.user.update({
+      where: { id },
+      data: { isActive: false },
+    });
+  }
+
+  /**
+   * Get user profile without sensitive data
+   */
+  async getProfile(id: string): Promise<Omit<User, 'password'> | null> {
+    return prisma.user.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        email: true,
+        username: true,
+        name: true,
+        phone: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+  }
+}
+```
+
+**Repository Benefits**:
+
+1. **Abstraction**: Hides database implementation details
+2. **Testability**: Easy to mock for unit testing
+3. **Reusability**: Can be used by different services
+4. **Maintainability**: Database changes contained in one place
+5. **Type Safety**: Leverages Prisma's generated types
+
+#### `src/repositories/refreshToken.repository.ts` - Refresh Token Repository
+
+```typescript
+import { RefreshToken, Prisma } from '@prisma/client';
+import { prisma } from '../config/database';
+
+export interface CreateRefreshTokenData {
+  token: string;
+  userId: string;
+  expiresAt: Date;
+}
+
+export class RefreshTokenRepository {
+  /**
+   * Create a new refresh token
+   */
+  async create(data: CreateRefreshTokenData): Promise<RefreshToken> {
+    return prisma.refreshToken.create({
+      data,
+    });
+  }
+
+  /**
+   * Find refresh token by token value
+   */
+  async findByToken(token: string): Promise<RefreshToken | null> {
+    return prisma.refreshToken.findUnique({
+      where: { token },
+      include: { user: true },
+    });
+  }
+
+  /**
+   * Revoke (delete) refresh token
+   */
+  async revoke(token: string): Promise<void> {
+    await prisma.refreshToken.delete({
+      where: { token },
+    });
+  }
+
+  /**
+   * Revoke all refresh tokens for a user
+   */
+  async revokeAllForUser(userId: string): Promise<void> {
+    await prisma.refreshToken.deleteMany({
+      where: { userId },
+    });
+  }
+
+  /**
+   * Clean up expired tokens
+   */
+  async cleanupExpired(): Promise<void> {
+    await prisma.refreshToken.deleteMany({
+      where: {
+        expiresAt: { lt: new Date() },
+      },
+    });
+  }
+}
+```
+
+**Connections**:
+
+- Both repositories use the `prisma` client from `src/config/database.ts`
+- Used by `AuthService` for data operations
+- Types are exported and used by services
+
+### Middleware Layer
+
+#### `src/middleware/auth.ts` - Authentication Middleware
+
+Middleware functions run before your route handlers to perform common tasks.
+
+```typescript
+import { Request, Response, NextFunction } from 'express';
+import { verifyAccessToken } from '../utils/jwt';
+import { UserRepository } from '../repositories/user.repository';
+import { UnauthorizedError } from '../utils/errors';
+
+export interface AuthenticatedRequest extends Request {
+  user?: {
+    userId: string;
+    email: string;
+  };
+}
+
+/**
+ * Authentication middleware
+ * Verifies JWT token and adds user data to request
+ */
+export const authenticate = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> => {
+  try {
+    // Extract token from Authorization header
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new UnauthorizedError('No token provided');
+    }
+
+    const token = authHeader.split(' ')[1];
+
+    // Verify JWT token
+    const payload = verifyAccessToken(token);
+    if (!payload) {
+      throw new UnauthorizedError('Invalid token');
+    }
+
+    // Check if user still exists and is active
+    const userRepository = new UserRepository();
+    const user = await userRepository.findById(payload.userId);
+
+    if (!user || !user.isActive) {
+      throw new UnauthorizedError('User not found or inactive');
+    }
+
+    // Add user data to request object
+    req.user = {
+      userId: payload.userId,
+      email: payload.email,
+    };
+
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+```
+
+**Middleware Workflow**:
+
+1. **Extract Token**: Get JWT from Authorization header
+2. **Verify Token**: Validate JWT signature and expiration
+3. **Database Check**: Ensure user still exists and is active
+4. **Attach User**: Add user data to request object
+5. **Continue**: Call `next()` to proceed to route handler
+
+#### `src/middleware/validation.ts` - Input Validation Middleware
+
+```typescript
+import { Request, Response, NextFunction } from 'express';
+import Joi from 'joi';
+import { ValidationError } from '../utils/errors';
+
+/**
+ * Creates validation middleware for request body
+ */
+export const validate = (schema: Joi.ObjectSchema) => {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const { error, value } = schema.validate(req.body, {
+      abortEarly: false,
+      stripUnknown: true,
+    });
+
+    if (error) {
+      const validationErrors = error.details.map((detail) => ({
+        field: detail.path.join('.'),
+        message: detail.message,
+      }));
+
+      next(new ValidationError('Validation failed', validationErrors));
+      return;
+    }
+
+    // Replace request body with validated/sanitized data
+    req.body = value;
+    next();
+  };
+};
+```
+
+**Other Middleware Files**:
+
+- **`requestId.ts`**: Adds unique ID to each request for tracing
+- **`rateLimiter.ts`**: Implements rate limiting to prevent abuse
+- **`errorHandler.ts`**: Centralized error handling and response formatting
+
+### Validation Schemas
+
+#### `src/validators/auth.validators.ts` - Input Validation Rules
+
+```typescript
+import Joi from 'joi';
+
+export const signupSchema = Joi.object({
+  email: Joi.string().email().required().messages({
+    'string.email': 'Please provide a valid email address',
+    'any.required': 'Email is required',
+  }),
+
+  password: Joi.string()
+    .min(8)
+    .pattern(new RegExp('^(?=.*[a-z])(?=.*[A-Z])(?=.*[0-9])(?=.*[!@#\$%\^&\*])'))
+    .required()
+    .messages({
+      'string.min': 'Password must be at least 8 characters long',
+      'string.pattern.base':
+        'Password must contain uppercase, lowercase, number, and special character',
+      'any.required': 'Password is required',
+    }),
+
+  username: Joi.string().alphanum().min(3).max(30).optional().messages({
+    'string.alphanum': 'Username must contain only letters and numbers',
+    'string.min': 'Username must be at least 3 characters long',
+    'string.max': 'Username cannot exceed 30 characters',
+  }),
+
+  name: Joi.string().min(1).max(100).optional().messages({
+    'string.min': 'Name cannot be empty',
+    'string.max': 'Name cannot exceed 100 characters',
+  }),
+
+  phone: Joi.string().pattern(new RegExp('^\\+[1-9]\\d{1,14}$')).optional().messages({
+    'string.pattern.base': 'Phone must be in international format (e.g., +1234567890)',
+  }),
+});
+
+export const loginSchema = Joi.object({
+  email: Joi.string().email().required().messages({
+    'string.email': 'Please provide a valid email address',
+    'any.required': 'Email is required',
+  }),
+
+  password: Joi.string().required().messages({
+    'any.required': 'Password is required',
+  }),
+});
+
+// ... other validation schemas
+```
+
+**Validation Features**:
+
+- **Type Checking**: Ensures correct data types
+- **Format Validation**: Email, phone, password complexity
+- **Custom Messages**: User-friendly error messages
+- **Data Sanitization**: Removes unknown fields
+
+### Utility Functions
+
+#### `src/utils/jwt.ts` - JWT Token Management
+
+```typescript
+import jwt from 'jsonwebtoken';
+import { config } from '../config';
+
+export interface TokenPayload {
+  userId: string;
+  email: string;
+}
+
+export interface TokenPair {
+  accessToken: string;
+  refreshToken: string;
+}
+
+/**
+ * Generate access and refresh token pair
+ */
+export const generateTokenPair = (payload: TokenPayload): TokenPair => {
+  const accessToken = jwt.sign(payload, config.JWT_ACCESS_SECRET, {
+    expiresIn: config.JWT_ACCESS_EXPIRES_IN,
+  });
+
+  const refreshToken = jwt.sign(payload, config.JWT_REFRESH_SECRET, {
+    expiresIn: config.JWT_REFRESH_EXPIRES_IN,
+  });
+
+  return { accessToken, refreshToken };
+};
+
+/**
+ * Verify access token
+ */
+export const verifyAccessToken = (token: string): TokenPayload | null => {
+  try {
+    return jwt.verify(token, config.JWT_ACCESS_SECRET) as TokenPayload;
+  } catch (error) {
+    return null;
+  }
+};
+
+/**
+ * Verify refresh token
+ */
+export const verifyRefreshToken = (token: string): TokenPayload | null => {
+  try {
+    return jwt.verify(token, config.JWT_REFRESH_SECRET) as TokenPayload;
+  } catch (error) {
+    return null;
+  }
+};
+```
+
+#### `src/utils/response.ts` - Standardized API Responses
+
+```typescript
+import { Response } from 'express';
+
+export interface ApiResponse<T = any> {
+  success: boolean;
+  data?: T;
+  message: string;
+  errors?: Array<{ field: string; message: string }>;
+  requestId?: string;
+  timestamp: string;
+}
+
+/**
+ * Send success response
+ */
+export const sendSuccess = <T>(
+  res: Response,
+  data: T,
+  message: string = 'Success',
+  statusCode: number = 200
+): void => {
+  const response: ApiResponse<T> = {
+    success: true,
+    data,
+    message,
+    requestId: res.locals.requestId,
+    timestamp: new Date().toISOString(),
+  };
+
+  res.status(statusCode).json(response);
+};
+
+/**
+ * Send error response
+ */
+export const sendError = (
+  res: Response,
+  message: string,
+  statusCode: number = 500,
+  errors?: Array<{ field: string; message: string }>
+): void => {
+  const response: ApiResponse = {
+    success: false,
+    message,
+    errors,
+    requestId: res.locals.requestId,
+    timestamp: new Date().toISOString(),
+  };
+
+  res.status(statusCode).json(response);
+};
+```
+
+#### `src/utils/errors.ts` - Custom Error Classes
+
+```typescript
+export class AppError extends Error {
+  public statusCode: number;
+  public isOperational: boolean;
+
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.statusCode = statusCode;
+    this.isOperational = true;
+
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+export class ValidationError extends AppError {
+  public errors: Array<{ field: string; message: string }>;
+
+  constructor(message: string, errors: Array<{ field: string; message: string }>) {
+    super(message, 400);
+    this.errors = errors;
+  }
+}
+
+export class UnauthorizedError extends AppError {
+  constructor(message: string = 'Unauthorized') {
+    super(message, 401);
+  }
+}
+
+export class ConflictError extends AppError {
+  constructor(message: string) {
+    super(message, 409);
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(message: string) {
+    super(message, 404);
+  }
+}
+```
+
+### Routing
+
+#### `src/routes/index.ts` - Main Router
+
+```typescript
+import { Router } from 'express';
+import { authRoutes } from './auth.routes';
+
+const router = Router();
+
+// Health check endpoint
+router.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Server is healthy',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV,
+  });
+});
+
+// Authentication routes
+router.use('/auth', authRoutes);
+
+export { router as routes };
+```
+
+#### `src/routes/auth.routes.ts` - Authentication Routes
+
+```typescript
+import { Router } from 'express';
+import { AuthController } from '../controllers/auth.controller';
+import { authenticate } from '../middleware/auth';
+import { validate } from '../middleware/validation';
+import { loginLimiter, signupLimiter } from '../middleware/rateLimiter';
+import {
+  signupSchema,
+  loginSchema,
+  refreshTokenSchema,
+  updateProfileSchema,
+} from '../validators/auth.validators';
+
+const router = Router();
+const authController = new AuthController();
+
+// Public routes
+router.post('/signup', signupLimiter, validate(signupSchema), authController.signup);
+router.post('/login', loginLimiter, validate(loginSchema), authController.login);
+router.post('/refresh', validate(refreshTokenSchema), authController.refreshToken);
+
+// Protected routes
+router.post('/logout', authenticate, authController.logout);
+router.get('/user/profile', authenticate, authController.getProfile);
+router.put(
+  '/user/profile',
+  authenticate,
+  validate(updateProfileSchema),
+  authController.updateProfile
+);
+
+export { router as authRoutes };
+```
+
+**Route Structure Explanation**:
+
+- **Middleware Order**: Rate limiting → Validation → Authentication → Controller
+- **Public Routes**: Signup, login, refresh token
+- **Protected Routes**: Require authentication middleware
+- **Validation**: Each route has appropriate input validation
+
+### How Everything Connects
+
+Let's trace a complete request flow to see how all pieces work together:
+
+#### Example: User Login Request
+
+```
+1. HTTP Request: POST /api/v1/auth/login
+   Body: { "email": "user@example.com", "password": "password123" }
+
+2. Express Middleware Chain:
+   app.ts → requestId → rateLimiter → routes
+
+3. Route Matching:
+   routes/index.ts → routes/auth.routes.ts → POST /login
+
+4. Route Middleware:
+   loginLimiter → validate(loginSchema) → authController.login
+
+5. Controller:
+   AuthController.login() → authService.login()
+
+6. Service Business Logic:
+   - userRepository.findByEmail()
+   - bcrypt.compare()
+   - generateTokenPair()
+   - refreshTokenRepository.create()
+
+7. Database Operations:
+   Prisma → PostgreSQL queries
+
+8. Response:
+   Service → Controller → sendSuccess() → JSON response
+
+9. Error Handling:
+   Any error → next(error) → errorHandler middleware
+```
+
+#### Data Flow Diagram
+
+```
+HTTP Request
+     ↓
+Express App (app.ts)
+     ↓
+Middleware Chain
+     ↓
+Routes (auth.routes.ts)
+     ↓
+Controller (auth.controller.ts)
+     ↓
+Service (auth.service.ts)
+     ↓
+Repository (user.repository.ts)
+     ↓
+Prisma Client
+     ↓
+PostgreSQL Database
+     ↓
+Response flows back up the chain
+```
+
+### Key Architectural Benefits
+
+1. **Separation of Concerns**: Each layer has a specific responsibility
+2. **Testability**: Each component can be tested in isolation
+3. **Maintainability**: Changes to one layer don't affect others
+4. **Scalability**: Easy to add new features following the same patterns
+5. **Type Safety**: TypeScript ensures correctness throughout the stack
+6. **Error Handling**: Centralized error handling with custom error types
+7. **Security**: Multiple layers of validation and authentication
+8. **Consistency**: Standardized patterns for requests, responses, and data flow
+
+This architecture follows industry best practices and makes the codebase maintainable, testable, and scalable. Each file has a clear purpose and well-defined interfaces with other components.
 
 ---
 
